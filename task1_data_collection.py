@@ -1,139 +1,165 @@
 import requests
 import json
-import time
 import os
 from datetime import datetime
 
-TOP_STORIES_URL = "https://hacker-news.firebaseio.com/v0/topstories.json"
-ITEM_URL = "https://hacker-news.firebaseio.com/v0/item/{}.json"
+# hn api to find stories link provided
+hn_top = "https://hacker-news.firebaseio.com/v0/topstories.json"
+hn_item = "https://hacker-news.firebaseio.com/v0/item/{}.json"
 
-HEADERS = {"User-Agent": "TrendPulse/1.0"}
+req_headers = {"User-Agent": "TrendScraper-personal/0.1"}
 
-# category keywords to find best stories
-CATEGORIES = {
+#selected keywords for better search 
+topic_map = {
     "technology": [
-        "ai","software","tech","code","computer","data","cloud",
-        "api","gpu","llm","openai","github","linux","developer"
+        "ai", "software", "tech", "code", "computer", "data", "cloud",
+        "api", "gpu", "llm", "openai", "github", "linux", "developer"
     ],
     "worldnews": [
-        "war","government","country","president","election",
-        "climate","attack","global","china","india","russia",
-        "uk","eu","policy","military"
+        "war", "government", "country", "president", "election",
+        "climate", "attack", "global", "china", "india", "russia",
+        "uk", "eu", "policy", "military"
     ],
-   "sports": [
-    "sport","game","match","team","player","league",
-    "football","cricket","tennis","olympic","championship",
-    "score","season","coach","tournament",
-    "nba","nfl","fifa","mlb","world cup",
-    "club","goal","cup","athlete"
+    "sports": [
+        "sport", "match", "team", "player", "league",
+        "football", "cricket", "tennis", "olympic", "championship",
+        "score", "season", "coach", "tournament",
+        "nba", "nfl", "fifa", "mlb", "world cup",
+        "club", "goal", "cup", "athlete"
     ],
-
     "science": [
-    "research","study","space","physics","biology",
-    "discovery","nasa","scientists","quantum","experiment",
-    "astronomy","genome","medicine","neural",
-    "brain","cell","protein","particle","mars",
-    "telescope","lab","scientific","satellite"
+        "research", "study", "space", "physics", "biology",
+        "discovery", "nasa", "scientists", "quantum", "experiment",
+        "astronomy", "genome", "medicine", "neural",
+        "brain", "cell", "protein", "particle", "mars",
+        "telescope", "lab", "scientific", "satellite"
     ],
     "entertainment": [
-        "movie","film","music","netflix","game","book",
-        "show","award","streaming","tv","series",
-        "hollywood","anime","video"
+        "movie", "film", "music", "netflix", "book",
+        "show", "award", "streaming", "tv", "series",
+        "hollywood", "anime", "video"
     ]
 }
-MAX_PER_CATEGORY = 25
+
+# 25 per topic beacuse of given constraint
+stories_per_topic = 25
 
 
-# to help the keyword search
-def get_category(title):
-    title = title.lower()
-
-    for category, keywords in CATEGORIES.items():
-        if any(keyword in title for keyword in keywords):
-            return category
-
+def guess_topic(title):
+    t = title.lower()
+    for topic in topic_map:
+        for kw in topic_map[topic]:
+            if kw in t:
+                return topic
     return None
 
 
-def fetch_json(url):
-    """Safe API call"""
+def hit_hn(url):
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
-        return response.json()
+        r = requests.get(url, headers=req_headers, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.ConnectionError:
+        print("no internet or hn is down?")
+        return None
+    except requests.exceptions.Timeout:
+        print("took too long:", url)
+        return None
+    except requests.exceptions.HTTPError as e:
+        print("bad response", e)
+        return None
     except Exception as e:
-        print(f"Request failed: {e}")
+        print("unexpected error:", e)
         return None
 
 
-# main code for the category search
-def main():
-    print("Fetching top stories...")
+def run():
+    print("pulling top story ids...")
 
-    story_ids = fetch_json(TOP_STORIES_URL)
+    id_list = hit_hn(hn_top)
 
-    if not story_ids:
-        print("Failed to fetch story IDs")
+    if id_list is None:
+        print("failed at first step, giving up")
         return
 
-    story_ids = story_ids[:1000]
+    # hn for top500 as to be taken
+    id_list = id_list[:1000]
 
-    results = []
-    category_counts = {cat: 0 for cat in CATEGORIES}
+    collected = []
+    topic_tally = {}
+    for t in topic_map:
+        topic_tally[t] = 0
 
-    for story_id in story_ids:
+    done_count = 0
 
-        # stop only when all categories 
-        if all(count >= MAX_PER_CATEGORY for count in category_counts.values()):
+    for item_id in id_list:
+
+        buckets_full = 0
+        for t in topic_tally:
+            if topic_tally[t] >= stories_per_topic:
+                buckets_full += 1
+        if buckets_full == len(topic_tally):
+            print("all topics full, stopping early")
             break
 
-        story = fetch_json(ITEM_URL.format(story_id))
-        if not story:
+        raw = hit_hn(hn_item.format(item_id))
+
+        if raw is None:
             continue
 
-        title = story.get("title", "")
-        if not title:
+        if raw.get("type") != "story":
             continue
 
-        category = get_category(title)
-
-        if category is None:
-            category = min(category_counts, key=category_counts.get)
-
-        # skip if more than 25
-        if category_counts[category] >= MAX_PER_CATEGORY:
+        heading = raw.get("title", "").strip()
+        if not heading:
             continue
 
-        record = {
-            "post_id": story.get("id"),
-            "title": title.strip(),
-            "category": category,
-            "score": story.get("score", 0),
-            "num_comments": story.get("descendants", 0),
-            "author": story.get("by"),
-            "collected_at": datetime.now().isoformat()
+        topic = guess_topic(heading)
+
+        if topic is None:
+            least_filled = None
+            min_so_far = 99999
+            for t in topic_tally:
+                if topic_tally[t] < min_so_far:
+                    min_so_far = topic_tally[t]
+                    least_filled = t
+            topic = least_filled
+
+        if topic_tally[topic] >= stories_per_topic:
+            continue
+
+        entry = {
+            "post_id":      raw.get("id"),
+            "title":        heading,
+            "topic":        topic,
+            "points":       raw.get("score", 0),
+            "comments":     raw.get("descendants", 0),
+            "posted_by":    raw.get("by", "unknown"),
+            "url":          raw.get("url", ""),
+            "scraped_at":   datetime.now().isoformat()
         }
 
-        results.append(record)
-        category_counts[category] += 1
+        collected.append(entry)
+        topic_tally[topic] = topic_tally[topic] + 1
+        done_count += 1
 
-    # to know which categories have 25 and less
-    print("\nCategory counts:")
-    for k, v in category_counts.items():
-        print(f"{k}: {v}")
+    print("\nstories per topic:")
+    for t in topic_tally:
+        bar = "#" * topic_tally[t]  
+        print(f"  {t:15} {topic_tally[t]:3}  {bar}")
 
-    # file saved as json
-    os.makedirs("data", exist_ok=True)
+    # creating folder
+    if not os.path.exists("data"):
+        os.makedirs("data")
 
-    date_str = datetime.now().strftime("%Y%m%d")
-    output_file = f"data/trends_{date_str}.json"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")  # added time so reruns dont overwrite
+    save_path = "data/hn_trends_" + stamp + ".json"
 
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
+    fout = open(save_path, "w", encoding="utf-8")
+    json.dump(collected, fout, indent=2)
+    fout.close()
 
-    print(f"\nCollected {len(results)} stories. Saved to {output_file}")
+    print("\ndone! saved", done_count, "stories to", save_path)
 
 
-if __name__ == "__main__":
-    main()
-print("\nCategory counts:")
+run()
